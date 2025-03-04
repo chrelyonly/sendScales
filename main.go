@@ -2,20 +2,15 @@ package main
 
 import (
 	"bufio"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
+	"github.com/fatih/color"
 	"io"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +34,7 @@ func connectToTCP(ip string, port string) error {
 	tcpAddress := fmt.Sprintf("%s:%s", ip, port)
 
 	// 建立与 TCP 服务器的连接
-	conn, err := net.Dial("tcp", tcpAddress)
+	conn, err := net.DialTimeout("tcp", tcpAddress, 1000*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("无法连接到 TCP 服务器 %s: %v", tcpAddress, err)
 	}
@@ -49,7 +44,7 @@ func connectToTCP(ip string, port string) error {
 	tcpConn = conn
 	mu.Unlock()
 
-	fmt.Println("成功连接到 TCP 服务器！")
+	color.Green("成功连接到 TCP 服务器！")
 	return nil
 }
 
@@ -115,7 +110,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf("TCP 服务器响应: %s", response)))
 	//打印到终端
-	fmt.Printf("收到请求: %s, %s, %s, %s\n", name, code, data, response)
+	color.Green("收到请求: %s, %s, %s, %s\n", name, code, data, response)
 }
 
 // 读取配置文件
@@ -154,168 +149,316 @@ func saveConfig(config *Config) error {
 	return nil
 }
 
-// 检查证书文件是否存在，如果不存在则生成新的证书
-func checkAndGenerateCert(certFile, keyFile string) error {
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		fmt.Println("证书文件不存在，生成新的证书...")
-		return generateCert(certFile, keyFile)
-	}
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		fmt.Println("密钥文件不存在，生成新的密钥...")
-		return generateCert(certFile, keyFile)
-	}
-	return nil
-}
-
-// 生成自签名证书和密钥
-func generateCert(certFile, keyFile string) error {
-	priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if err != nil {
-		return fmt.Errorf("无法生成私钥: %v", err)
-	}
-
-	notBefore := time.Now()
-	notAfter := notBefore.Add(365 * 24 * time.Hour)
-
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return fmt.Errorf("无法生成序列号: %v", err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"My Organization"},
-		},
-		NotBefore: notBefore,
-		NotAfter:  notAfter,
-
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return fmt.Errorf("无法生成证书: %v", err)
-	}
-
-	certOut, err := os.Create(certFile)
-	if err != nil {
-		return fmt.Errorf("无法创建证书文件: %v", err)
-	}
-	defer certOut.Close()
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	keyOut, err := os.Create(keyFile)
-	if err != nil {
-		return fmt.Errorf("无法创建密钥文件: %v", err)
-	}
-	defer keyOut.Close()
-	privBytes, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return fmt.Errorf("无法编码私钥: %v", err)
-	}
-	pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
-
-	fmt.Println("成功生成证书和密钥文件")
-	return nil
-}
-
 func main() {
-	// 先尝试读取配置文件
-	config, err := readConfig()
-	if err != nil {
-		// 如果读取失败，则提示用户输入配置信息
-		fmt.Println("读取配置文件失败，使用默认配置。")
+	// 提示用户输入配置信息
+	reader := bufio.NewReader(os.Stdin)
+	currentTime := time.Now()
+	color.Green("当前时间: " + currentTime.Format("2006-01-02 15:04:05"))
+	color.Cyan("输入1手动填写配置")
+	color.Cyan("输入2自动识别秤")
+	// 获取输入的传秤方式
+	var way string
+	for {
+		fmt.Print("请选择启动方式 (1 或 2): ")
+		input, _ := reader.ReadString('\n')
+		way = strings.TrimSpace(input) // 去除前后空格和换行符
 
-		// 提示用户输入配置信息
-		reader := bufio.NewReader(os.Stdin)
-
-		// 获取 TCP 服务器的 IP 地址
-		fmt.Print("请输入 TCP 服务器 IP 地址: ")
-		ip, _ := reader.ReadString('\n')
-		ip = strings.TrimSpace(ip)
-
-		// 获取 TCP 服务器的端口号
-		fmt.Print("请输入 TCP 服务器端口号: ")
-		port, _ := reader.ReadString('\n')
-		port = strings.TrimSpace(port)
-
-		// 获取 Web 服务器端口
-		fmt.Print("请输入 Web 服务器端口号: ")
-		webPort, _ := reader.ReadString('\n')
-		webPort = strings.TrimSpace(webPort)
-
-		// 获取 Web 服务器 HTTPS 端口
-		fmt.Print("请输入 Web 服务器 HTTPS 端口号: ")
-		webPortTLS, _ := reader.ReadString('\n')
-		webPortTLS = strings.TrimSpace(webPortTLS)
-
-		// 保存配置信息
-		config = &Config{TCPIP: ip, TCPPort: port, WebPort: webPort, WebPortTLS: webPortTLS}
-		err = saveConfig(config)
-		if err != nil {
-			log.Fatalf("保存配置失败: %v\n", err)
+		// 判断是否为空或者无效输入
+		if way == "" {
+			color.Red("未输入，默认选择 2")
+			way = "2"
+			break
+		} else if way != "1" && way != "2" {
+			color.Red("输入错误，请输入 1 或 2")
+		} else {
+			break
 		}
 	}
+	way = strings.TrimSpace(way)
+	if way == "1" {
+		// 先尝试读取配置文件
+		config, err := readConfig()
+		if err != nil {
+			// 如果读取失败，则提示用户输入配置信息
+			color.Green("读取配置文件失败，使用默认配置。")
 
-	// 在此进行 TCP 连接
-	err = connectToTCP(config.TCPIP, config.TCPPort)
-	if err != nil {
-		log.Fatalf("无法连接到 TCP 服务器: %v\n", err)
+			// 获取 TCP 服务器的 IP 地址
+			fmt.Print("请输入 TCP 服务器 IP 地址: ")
+			ip, _ := reader.ReadString('\n')
+			ip = strings.TrimSpace(ip)
+
+			// 获取 TCP 服务器的端口号
+			fmt.Print("请输入 TCP 服务器端口号: ")
+			port, _ := reader.ReadString('\n')
+			port = strings.TrimSpace(port)
+
+			// 获取 Web 服务器端口
+			fmt.Print("请输入 Web 服务器端口号: ")
+			webPort, _ := reader.ReadString('\n')
+			webPort = strings.TrimSpace(webPort)
+
+			// 获取 Web 服务器 HTTPS 端口
+			fmt.Print("请输入 Web 服务器 HTTPS 端口号: ")
+			webPortTLS, _ := reader.ReadString('\n')
+			webPortTLS = strings.TrimSpace(webPortTLS)
+
+			// 保存配置信息
+			config = &Config{TCPIP: ip, TCPPort: port, WebPort: webPort, WebPortTLS: webPortTLS}
+			err = saveConfig(config)
+			if err != nil {
+				log.Fatalf("保存配置失败: %v\n", err)
+			}
+		}
+
+		// 在此进行 TCP 连接
+		err = connectToTCP(config.TCPIP, config.TCPPort)
+		if err != nil {
+			log.Fatalf("无法连接到 TCP 服务器: %v\n", err)
+		}
+		// 打印 TCP 服务器的 IP 和端口
+		color.Green("已连接至秤地址: %s\n", config.TCPIP+":"+config.TCPPort)
+
+		// 打印本机 IP 地址和端口
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			fmt.Println(err)
+		}
+		for _, address := range addrs {
+			// 检查 ip 地址是否是回环地址
+			if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					color.Green("本机 IP 地址: http://" + ipnet.IP.String() + ":" + config.WebPort + " https://" + ipnet.IP.String() + ":" + config.WebPortTLS)
+				}
+			}
+		}
+
+		// 设置 HTTP 路由和处理函数
+		http.HandleFunc("/send", handler)
+		//https.HandleFunc("/send", handler)
+		// 启动 HTTP 和 HTTPS 服务器
+		go func() {
+			if err := http.ListenAndServe(":"+config.WebPort, nil); err != nil {
+				log.Fatalf("HTTP 服务器启动失败: %v\n", err)
+			}
+		}()
+
+		go func() {
+			if err := http.ListenAndServeTLS(":"+config.WebPortTLS, "cert.pem", "key.pem", nil); err != nil {
+				log.Fatalf("HTTPS 服务器启动失败: %v\n", err)
+			}
+		}()
+		// 阻止程序退出
+		select {}
+	} else if way == "2" {
+		ips, err := scanLocalIPs()
+		if err != nil || len(ips) == 0 {
+			log.Fatalf("无法扫描局域网 IP: %v", err)
+		}
+		color.Blue("扫描到的局域网 IP 网段:")
+		// 打印去重后的网段
+		i := 1
+		for index := range ips {
+			color.Green(strconv.Itoa(i) + "." + ips[index])
+			i++
+		}
+		color.Blue("请选择秤所在的IP(在秤的左上角查询秤IP)网段（输入编号）: ")
+		reader := bufio.NewReader(os.Stdin)
+
+		var choice string
+		for {
+			input, err := reader.ReadString('\n')
+			if err != nil {
+				color.Red("读取输入失败，默认选择 1")
+				choice = "1"
+				break
+			}
+
+			choice = strings.TrimSpace(input) // 去除换行和空格
+			if choice == "" {
+				color.Red("未输入，默认选择 1")
+				choice = "1"
+				break
+			}
+
+			// 检查输入是否为有效的数字
+			if _, err := strconv.Atoi(choice); err != nil {
+				color.Red("输入错误，请输入有效的编号")
+			} else {
+				break
+			}
+		}
+		choice = strings.TrimSpace(choice)
+		index := 0
+		fmt.Sscanf(choice, "%d", &index)
+		if index < 1 || index > len(ips) {
+			log.Fatal("无效的选择")
+			return
+		}
+
+		selectedIP := ips[index-1]
+		subnet := selectedIP[:strings.LastIndex(selectedIP, ".")+1] + "0"
+
+		color.Green("已选择网段: %s/24，正在扫描...\n", subnet)
+
+		// 扫描该网段下所有 IP 的 4001 端口
+		availableIPs := scanDevicesInSubnet(subnet, "4001")
+
+		if len(availableIPs) == 0 {
+			color.RedString("未发现未找到秤")
+			return
+		}
+
+		// 4. 显示可用设备
+		color.HiGreen("找到以下可用设备：")
+		for i, ip := range availableIPs {
+			color.Red("%d. %s\n", i+1, ip)
+		}
+		fmt.Print("请选择设备 IP（输入编号）: ")
+		choice, err = reader.ReadString('\n')
+		if err != nil {
+			color.Red("读取输入失败, 默认选择 1")
+			choice = "1"
+		}
+
+		choice = strings.TrimSpace(choice)
+
+		// 如果用户没有输入，默认选择 1
+		if choice == "" {
+			color.Yellow("未输入任何值，默认选择 1")
+			choice = "1"
+		}
+
+		// 校验输入是否是数字
+		index, convErr := strconv.Atoi(choice)
+		if convErr != nil || index < 1 || index > len(ips) {
+			color.Red("输入无效，请输入有效编号")
+			return
+		}
+
+		selectedIP = ips[index-1]
+		fmt.Printf("已选择 IP: %s\n", selectedIP)
+
+		index = 0
+		fmt.Sscanf(choice, "%d", &index)
+		if index < 1 || index > len(availableIPs) {
+			log.Fatal("无效的选择")
+			return
+		}
+		selectedDeviceIP := availableIPs[index-1]
+		color.Green("已选择设备 IP: %s\n", selectedDeviceIP)
+
+		// 5. 连接到选定的设备
+		err = connectToTCP(selectedDeviceIP, "4001")
+		if err != nil {
+			log.Fatalf("无法连接到秤: %v\n", err)
+			return
+		}
+		// 打印 TCP 服务器的 IP 和端口
+		color.Green("已连接至秤: %s\n", selectedDeviceIP+":4001")
+
+		// 打印本机 IP 地址和端口
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			fmt.Println(err)
+		}
+		for _, address := range addrs {
+			// 检查 ip 地址是否是回环地址
+			if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					color.Green("本机 IP 地址: http://" + ipnet.IP.String() + ":14778" + " https://" + ipnet.IP.String() + ":14779")
+					color.Green("请将该地址填写在门店后台的打印机的(i达小屋传秤软件.exe)的https+端口地址：)处,然后再传秤界面上选择(新*传秤按钮)" + " https://" + ipnet.IP.String() + ":14779/send")
+				}
+			}
+		}
+		color.Green("访问以上网址返回(404 page not found)或(缺少 'data' 参数)则表示配置成功")
+		color.Green("提示不安全则需要安装证书")
+		// 设置 HTTP 路由和处理函数
+		http.HandleFunc("/send", handler)
+		//https.HandleFunc("/send", handler)
+		// 启动 HTTP 和 HTTPS 服务器
+		go func() {
+			if err := http.ListenAndServe(":14778", nil); err != nil {
+				log.Fatalf("HTTP 服务器启动失败: %v\n", err)
+			}
+		}()
+
+		go func() {
+			if err := http.ListenAndServeTLS(":14779", "cert.pem", "key.pem", nil); err != nil {
+				log.Fatalf("HTTPS 服务器启动失败: %v\n", err)
+			}
+		}()
+		// 阻止程序退出
+		select {}
+	} else {
+		color.RedString("输入错误")
 	}
 
-	// 检查并生成证书文件
-	err = checkAndGenerateCert("cert.pem", "key.pem")
+}
+func scanLocalIPs() ([]string, error) {
+	var ips []string
+	interfaces, err := net.Interfaces()
 	if err != nil {
-		log.Fatalf("生成证书失败: %v\n", err)
+		return nil, err
 	}
 
-	// 设置日志输出到文件，确保日志文件使用UTF-8编码
-	logFile, err := os.OpenFile("server.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		log.Fatalf("无法打开日志文件: %v\n", err)
-	}
-	defer logFile.Close()
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
 
-	// 设置日志输出格式和时间戳
-	log.SetOutput(logFile)
-	log.SetFlags(log.LstdFlags | log.Llongfile)
-
-	// 打印 TCP 服务器的 IP 和端口
-	fmt.Printf("已连接至秤地址: %s\n", config.TCPIP+":"+config.TCPPort)
-
-	// 打印本机 IP 地址和端口
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		fmt.Println(err)
-	}
-	for _, address := range addrs {
-		// 检查 ip 地址是否是回环地址
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				fmt.Println("本机 IP 地址: http://", ipnet.IP.String()+":"+config.WebPort+" https://"+ipnet.IP.String()+":"+config.WebPortTLS)
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+				ips = append(ips, ipNet.IP.String())
 			}
 		}
 	}
+	return ips, nil
+}
 
-	// 设置 HTTP 路由和处理函数
-	http.HandleFunc("/send", handler)
-	//https.HandleFunc("/send", handler)
-	// 启动 HTTP 和 HTTPS 服务器
-	go func() {
-		if err := http.ListenAndServe(":"+config.WebPort, nil); err != nil {
-			log.Fatalf("HTTP 服务器启动失败: %v\n", err)
-		}
-	}()
+// 扫描网段内开放 4001 端口的设备
+func scanDevicesInSubnet(subnet string, port string) []string {
+	subnetIPs := generateSubnetIPs(subnet) // 生成该网段所有 IP
+	var availableIPs []string
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	semaphore := make(chan struct{}, 50) // 限制并发数，避免网络阻塞
 
-	go func() {
-		if err := http.ListenAndServeTLS(":"+config.WebPortTLS, "cert.pem", "key.pem", nil); err != nil {
-			log.Fatalf("HTTPS 服务器启动失败: %v\n", err)
-		}
-	}()
+	color.Green("开始扫描网段 %s 端口 %s ...\n", subnet, port)
 
-	// 阻止程序退出
-	select {}
+	for _, ip := range subnetIPs {
+		wg.Add(1)
+		semaphore <- struct{}{} // 控制并发
+
+		go func(ip string) {
+			defer wg.Done()
+			defer func() { <-semaphore }() // 释放并发控制
+
+			address := fmt.Sprintf("%s:%s", ip, port)
+			//color.Green()("正在扫描: %s\n", address) // 打印扫描进度
+
+			conn, err := net.DialTimeout("tcp", address, 1000*time.Millisecond) // 设置超时
+			if err == nil {
+				mu.Lock()
+				availableIPs = append(availableIPs, ip)
+				mu.Unlock()
+				color.Green("发现可用设备: %s\n", ip) // 发现可用 IP 时打印
+				conn.Close()
+			}
+		}(ip)
+	}
+
+	wg.Wait()
+	color.Green("扫描完成。")
+	return availableIPs
+}
+
+// 生成 IP 网段（假设网段为 192.168.1.0/24）
+func generateSubnetIPs(subnet string) []string {
+	var subnetIPs []string
+	baseIP := subnet[:strings.LastIndex(subnet, ".")+1] // 提取网段前缀，如 192.168.1.
+	for i := 1; i < 255; i++ {                          // 遍历 1~254 号 IP
+		subnetIPs = append(subnetIPs, fmt.Sprintf("%s%d", baseIP, i))
+	}
+	return subnetIPs
 }
